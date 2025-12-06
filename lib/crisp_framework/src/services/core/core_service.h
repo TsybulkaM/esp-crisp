@@ -12,7 +12,7 @@ public:
     static CoreService* getInstance() { return instance; }
     static void setInstance(CoreService* svc) { instance = svc; }
 
-    #ifdef CORE_DEBUG_LEVEL
+    #if CORE_DEBUG_LEVEL
     // --- Logging utilities ---
 
     static void log_info(const char* tag, const char* format, ...);

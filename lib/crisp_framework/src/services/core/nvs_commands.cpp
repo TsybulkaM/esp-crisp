@@ -1,4 +1,4 @@
-#ifdef CORE_DEBUG_LEVEL
+#if CORE_DEBUG_LEVEL
 
 #include "core_service.h"
 

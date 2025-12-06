@@ -1,46 +1,45 @@
 #include "settings_service.h"
+#include "components/wifi.h"
 
 extern "C" {
 
-void settings_toggleSound() {
+int settings_getComponentCount() {
     auto service = SettingsService::getInstance();
-    if (service) {
-        service->toggleSound();
+    return service ? service->getComponentCount() : 0;
+}
+
+const char* settings_getComponentName(int index) {
+    auto service = SettingsService::getInstance();
+    if (!service) return nullptr;
+    
+    auto component = service->getComponent(index);
+    return component ? component->get_name() : nullptr;
+}
+
+void settings_toggleComponent(int index) {
+    auto service = SettingsService::getInstance();
+    if (!service) return;
+    
+    auto component = service->getComponent(index);
+    if (component) {
+        component->toggle_state();
     }
 }
 
-bool settings_isSoundEnabled() {
+const char* settings_getComponentStateText(int index) {
     auto service = SettingsService::getInstance();
-    return service ? service->isSoundEnabled() : true;
+    if (!service) return "";
+    
+    auto component = service->getComponent(index);
+    return component ? component->get_current_state_text() : "";
 }
 
-void settings_startWiFiProvisioning() {
+int settings_getComponentStateColor(int index) {
     auto service = SettingsService::getInstance();
-    if (service) {
-        service->startWiFiProvisioning();
-    }
-}
-
-void settings_stopWiFiProvisioning() {
-    auto service = SettingsService::getInstance();
-    if (service) {
-        service->stopWiFiProvisioning();
-    }
-}
-
-bool settings_isWiFiProvisioningActive() {
-    auto service = SettingsService::getInstance();
-    return service ? service->isWiFiProvisioningActive() : false;
-}
-
-bool settings_isWiFiConnected() {
-    auto service = SettingsService::getInstance();
-    return service ? service->isWiFiConnected() : false;
-}
-
-const char* settings_getWiFiIP() {
-    auto service = SettingsService::getInstance();
-    return service ? service->getWiFiIP() : "0.0.0.0";
+    if (!service) return 0;
+    
+    auto component = service->getComponent(index);
+    return component ? component->get_current_state_color() : 0;
 }
 
 }
