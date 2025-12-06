@@ -9,7 +9,7 @@ private:
     IWiFi& wifiDriver;
     bool soundEnabled;
     
-    // HTTP server для provisioning
+    // HTTP server for provisioning
     httpd_handle_t httpServer;
     bool provisioningActive;
     
@@ -32,7 +32,7 @@ public:
     void setSoundEnabled(bool enabled);
     void toggleSound();
 
-    // WiFi provisioning (Service управляет логикой)
+    // WiFi provisioning
     bool startWiFiProvisioning();
     void stopWiFiProvisioning();
     bool isWiFiProvisioningActive() const { return provisioningActive; }
