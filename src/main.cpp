@@ -38,6 +38,12 @@ extern "C" void app_main()
     sound_service->createTask();
     frame_service->createTask();
 
+    #ifdef CORE_DEBUG_LEVEL
+    // Start serial command reader task
+    core_service->create_serial_command_task();
+    core_service->start_system_monitor();
+    #endif
+
     // Start WiFi and MQTT in background if credentials exist
     if (settings_service->hasWiFiCredentials()) {
         CoreService::log_info("Main", "Found WiFi credentials, connecting in background...");

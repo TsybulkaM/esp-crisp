@@ -91,7 +91,7 @@ void SoundService::soundTimerCallbackStatic(TimerHandle_t xTimer)
 
 void SoundService::createTask()
 {
-    xTaskCreate(updateSoundTaskStatic, "updateSoundTask", 8192, this, 2, &soundTaskHandle);
+    xTaskCreate(updateSoundTaskStatic, "updateSoundTask", 2048, this, 2, &soundTaskHandle);
 
     float soundFreq = (tempo / 60.0f) * TONE_PER_NOTE;
     uint32_t sound_interval_ms = (uint32_t)(1000.0f / soundFreq);
