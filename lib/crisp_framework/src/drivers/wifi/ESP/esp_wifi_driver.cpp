@@ -63,7 +63,41 @@ bool ESPWiFiDriver::startAP(const char* ssid, const char* password) {
     
     // Create AP netif if not exists
     if (!apNetif) {
+        CoreService::log_info(TAG, "Creating default WiFi AP netif with DHCP server");
         apNetif = esp_netif_create_default_wifi_ap();
+        if (!apNetif) {
+            CoreService::log_error(TAG, "Failed to create AP netif!");
+            return false;
+        }
+    } else {
+        CoreService::log_info(TAG, "Reusing existing AP netif");
+    }
+    
+    // Get and log AP IP configuration
+    esp_netif_ip_info_t ip_info;
+    if (esp_netif_get_ip_info(apNetif, &ip_info) == ESP_OK) {
+        CoreService::log_info(TAG, "AP IP: " IPSTR, IP2STR(&ip_info.ip));
+        CoreService::log_info(TAG, "AP Gateway: " IPSTR, IP2STR(&ip_info.gw));
+        CoreService::log_info(TAG, "AP Netmask: " IPSTR, IP2STR(&ip_info.netmask));
+    } else {
+        CoreService::log_error(TAG, "Failed to get AP IP info!");
+    }
+    
+    // Ensure DHCP server is started
+    esp_netif_dhcp_status_t dhcp_status;
+    if (esp_netif_dhcps_get_status(apNetif, &dhcp_status) == ESP_OK) {
+        if (dhcp_status != ESP_NETIF_DHCP_STARTED) {
+            CoreService::log_info(TAG, "DHCP server not running, starting...");
+            if (esp_netif_dhcps_start(apNetif) == ESP_OK) {
+                CoreService::log_info(TAG, "DHCP server started successfully");
+            } else {
+                CoreService::log_error(TAG, "Failed to start DHCP server!");
+            }
+        } else {
+            CoreService::log_info(TAG, "DHCP server already running");
+        }
+    } else {
+        CoreService::log_warn(TAG, "Could not get DHCP status, assuming it's running");
     }
     
     // Configure AP
@@ -73,6 +107,9 @@ bool ESPWiFiDriver::startAP(const char* ssid, const char* password) {
     wifi_config.ap.channel = 1;
     wifi_config.ap.max_connection = 4;
     wifi_config.ap.authmode = WIFI_AUTH_OPEN;
+    
+    CoreService::log_info(TAG, "AP Config - SSID: %s, Channel: %d, Max Connections: %d, Auth: OPEN", 
+        ssid, 1, 4);
     
     if (password && strlen(password) > 0) {
         strncpy((char*)wifi_config.ap.password, password, sizeof(wifi_config.ap.password) - 1);

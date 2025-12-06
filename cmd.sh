@@ -1,0 +1,1 @@
+sudo echo -e "$1\r\n" > /dev/ttyUSB0

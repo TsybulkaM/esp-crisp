@@ -12,11 +12,13 @@
 #include <stdarg.h>
 #include <string.h>
 
-#include "esp_vfs_dev.h"
+#include "driver/uart_vfs.h"
 #include <driver/uart.h>
 
+static uart_port_t UART_PORT_NUM = UART_NUM_0;
 
 CoreService* CoreService::instance = nullptr;
+
 
 CoreService::CoreService()
 {
@@ -55,7 +57,7 @@ CoreService::CoreService()
 
 // --- Logging utilities implementation ---
 
-#ifdef CORE_DEBUG_LEVEL
+#if CORE_DEBUG_LEVEL
 
 void CoreService::log_info(const char* tag, const char* format, ...)
 {
@@ -111,16 +113,13 @@ void CoreService::command_executor(const char* command) {
         return;
     }
     
-    // Make a copy since we'll modify it
     char cmd_copy[256];
     strncpy(cmd_copy, command, sizeof(cmd_copy) - 1);
     cmd_copy[sizeof(cmd_copy) - 1] = '\0';
     
-    // Simple tokenizer
     char* token = strtok(cmd_copy, " \t\n\r");
     if (!token) return;
-    
-    // Check for "nvs" command
+
     if (strcmp(token, "nvs") == 0) {
         token = strtok(NULL, " \t\n\r");
         if (!token) {
@@ -243,14 +242,13 @@ static void serial_command_task_impl(void* param) {
     char cmd_buffer[256];
     int cmd_pos = 0;
 
-    uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0);
-    esp_vfs_dev_uart_use_driver(UART_NUM_0);
-    
+    uart_driver_install(UART_PORT_NUM, 256, 0, 0, NULL, 0);
+
     setvbuf(stdin, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    esp_vfs_dev_uart_port_set_rx_line_endings(UART_NUM_0, ESP_LINE_ENDINGS_CR);
-    esp_vfs_dev_uart_port_set_tx_line_endings(UART_NUM_0, ESP_LINE_ENDINGS_CRLF);
+    uart_vfs_dev_use_driver(UART_PORT_NUM);
+    uart_vfs_dev_port_set_tx_line_endings(UART_PORT_NUM, ESP_LINE_ENDINGS_CRLF);
 
     CoreService::log_info("SerialCmd", "CLI ready on USB (stdin). Type 'help'.");
     
@@ -295,13 +293,54 @@ void CoreService::create_serial_command_task() {
     xTaskCreatePinnedToCore(
         serial_command_task_impl,
         "serial_cmd",
-        5120,
+        4096,  // Increased for logging with nvs commands
         nullptr,
         1,
         nullptr,
         1
     );
     CoreService::log_info("CoreService", "Serial command task created");
+}
+
+static void system_monitor_task_impl(void* param) {
+    static char task_list_buffer[1024];
+
+    while (1) {
+        printf("\n\n");
+        printf("================ SYSTEM MONITOR ================\n");
+        
+        printf("%-14s %-6s %-6s %-10s %-6s\n", "Name", "State", "Prio", "StackLeft", "ID");
+        printf("------------------------------------------------\n");
+
+        vTaskList(task_list_buffer);
+        printf("%s", task_list_buffer);
+
+        printf("------------------------------------------------\n");
+
+        uint32_t free_heap = esp_get_free_heap_size();
+        uint32_t min_free_heap = esp_get_minimum_free_heap_size();
+        uint32_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+
+        printf("TOTAL FREE HEAP:  %ld bytes\n", free_heap);
+        printf("MIN EVER HEAP:    %ld bytes\n", min_free_heap);
+        printf("LARGEST BLOCK:    %ld bytes\n", largest_block);
+        printf("================================================\n");
+
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+
+void CoreService::start_system_monitor() {
+    xTaskCreatePinnedToCore(
+        system_monitor_task_impl,
+        "sys_moniotor",
+        6144,
+        NULL,
+        1,
+        NULL,
+        1
+    );
+    CoreService::log_info("System", "Monitor task started");
 }
 
 #endif
