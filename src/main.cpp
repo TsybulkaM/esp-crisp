@@ -45,6 +45,10 @@ extern "C" void app_main()
     core_service->start_system_monitor();
     #endif
 
+    MqttService* mqtt_service = new MqttService(core_service->getDeviceId());
+    MqttService::setInstance(mqtt_service);
+    mqtt_service->start();
+
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }

@@ -29,10 +29,13 @@ MqttService::MqttService(const char* deviceIdArg, const char* broker_uri) {
     client = nullptr;
     isConnected = false;
     reconnectTask = nullptr;
-    scoreQueue = xQueueCreate(10, sizeof(ScoreMessage));
     publishTask = nullptr;
+    scoreQueue = xQueueCreate(10, sizeof(ScoreMessage));
     lastPublishTime = 0;
     currentGameCode[0] = '\0';
+    currentState = STATE_IDLE;
+    stateEnterTime = 0;
+    reconnectDelayMs = 5000;
 }
 
 MqttService::~MqttService() {
@@ -73,26 +76,11 @@ bool MqttService::start() {
     }
     CoreService::log_info(TAG, "MQTT client started, broker=%s, client_id=%s", brokerUri, deviceId);
     
-    // Start publish task and reconnect monitor
-    xTaskCreatePinnedToCore(publishTaskFunc, "mqttPub", 4096, this, 5, &publishTask, 1);
-    xTaskCreatePinnedToCore(reconnectTaskFunc, "mqttRecon", 3072, this, 4, &reconnectTask, 1);
+    // Start publish task and FSM
+    xTaskCreatePinnedToCore(publishTaskFunc, "mqttPub", 3072, this, 5, &publishTask, 1);
+    xTaskCreatePinnedToCore(state_machine_task_func, "mqttFSM", 3072, this, 4, &reconnectTask, 1);
     
     return true;
-}
-
-// Start MQTT client in background task - non-blocking
-void MqttService::startAsync() {
-    xTaskCreatePinnedToCore(
-        [](void* param) {
-            MqttService* self = (MqttService*)param;
-            // Small delay to let game start first
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            CoreService::log_info(TAG, "Starting MQTT client in background...");
-            self->start();
-            vTaskDelete(nullptr);
-        },
-        "mqttInit", 4096, this, 3, nullptr, 1
-    );
 }
 
 void MqttService::stop() {
@@ -113,42 +101,38 @@ void MqttService::mqtt_event_handler_cb(void* handler_args, esp_event_base_t bas
 void MqttService::handle_event(esp_mqtt_event_handle_t event) {
     switch (event->event_id) {
         case MQTT_EVENT_CONNECTED: {
-            CoreService::log_info(TAG, "MQTT connected");
+            CoreService::log_info(TAG, "MQTT event: connected");
             isConnected = true;
-            publishOnline();
+            if (currentState == STATE_CONNECTING) {
+                changeState(STATE_CONNECTED);
+            }
             break;
         }
         case MQTT_EVENT_DISCONNECTED:
-            CoreService::log_warn(TAG, "MQTT disconnected");
+            CoreService::log_warn(TAG, "MQTT event: disconnected");
             isConnected = false;
+            if (currentState == STATE_CONNECTED) {
+                changeState(STATE_DISCONNECTED);
+            }
             break;
         case MQTT_EVENT_ERROR:
-            CoreService::log_error(TAG, "MQTT error");
+            CoreService::log_error(TAG, "MQTT event: error");
             isConnected = false;
+            if (currentState == STATE_CONNECTED || currentState == STATE_CONNECTING) {
+                changeState(STATE_DISCONNECTED);
+            }
             break;
         default:
             break;
     }
 }
 
-bool MqttService::publishOnline() {
-    if (!client) return false;
-    char topic[128];
-    snprintf(topic, sizeof(topic), "devices/%s/status", deviceId);
-    const char* payload = "online";
-    int msg_id = esp_mqtt_client_publish(client, topic, payload, 0, 1, 1);
-    CoreService::log_info(TAG, "Published online message, msg_id=%d", msg_id);
-    
-    return msg_id >= 0;
-}
-
 bool MqttService::publishScore(int score, const char* gameCode) {
-    if (!scoreQueue || !isConnected) return false;
+    if (!scoreQueue) return false;
     
     ScoreMessage msg;
     msg.score = score;
     
-    // Use provided gameCode or fall back to currentGameCode
     const char* game = gameCode ? gameCode : currentGameCode;
     if (game && game[0] != '\0') {
         strncpy(msg.gameCode, game, sizeof(msg.gameCode) - 1);
@@ -157,7 +141,6 @@ bool MqttService::publishScore(int score, const char* gameCode) {
         strcpy(msg.gameCode, "UNKNOWN");
     }
     
-    // Non-blocking: just queue the message
     if (xQueueSend(scoreQueue, &msg, 0) != pdTRUE) {
         CoreService::log_warn(TAG, "Score queue full, dropping score=%d game=%s", score, msg.gameCode);
         return false;
@@ -169,18 +152,18 @@ void MqttService::publishTaskFunc(void* param) {
     MqttService* self = (MqttService*) param;
     ScoreMessage msg;
     while (true) {
-        // Wait for score from queue
         if (xQueueReceive(self->scoreQueue, &msg, portMAX_DELAY) == pdTRUE) {
-            self->doPublishScore(msg.score, msg.gameCode);
+            if (self->isConnected) {
+                self->doPublishScore(msg.score, msg.gameCode);
+            }
         }
     }
 }
 
 void MqttService::doPublishScore(int score, const char* gameCode) {
-    // Throttle: publish max once per second
-    int64_t now = esp_timer_get_time() / 1000; // ms
+    int64_t now = esp_timer_get_time() / 1000;
     if (now - lastPublishTime < PUBLISH_INTERVAL_MS) {
-        return; // silently throttle
+        return;
     }
     lastPublishTime = now;
     
@@ -188,7 +171,6 @@ void MqttService::doPublishScore(int score, const char* gameCode) {
     char topic[128];
     snprintf(topic, sizeof(topic), "devices/%s/score", deviceId);
     
-    // JSON payload with game code and score
     char payload[128];
     snprintf(payload, sizeof(payload), "{\"game\":\"%s\",\"score\":%d}", gameCode, score);
     
@@ -196,48 +178,11 @@ void MqttService::doPublishScore(int score, const char* gameCode) {
     CoreService::log_info(TAG, "Published score=%d game=%s, msg_id=%d", score, gameCode, msg_id);
 }
 
-void MqttService::reconnectTaskFunc(void* param) {
-    MqttService* self = (MqttService*) param;
-    int reconnectDelay = 5000; // Start with 5 seconds
-    const int maxReconnectDelay = 60000; // Max 60 seconds
-    
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(reconnectDelay));
-        
-        // Check WiFi status
-        wifi_ap_record_t ap_info;
-        bool wifiConnected = (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK);
-        
-        if (!wifiConnected) {
-            if (self->isConnected) {
-                CoreService::log_warn(TAG, "WiFi disconnected, stopping MQTT");
-                self->isConnected = false;
-                if (self->client) {
-                    esp_mqtt_client_stop(self->client);
-                }
-            }
-            reconnectDelay = 5000; // Reset delay when WiFi is down
-            continue;
-        }
-        
-        // WiFi is up, check MQTT
-        if (!self->isConnected && self->client) {
-            CoreService::log_info(TAG, "Attempting MQTT reconnect...");
-            esp_err_t err = esp_mqtt_client_reconnect(self->client);
-            if (err == ESP_OK) {
-                reconnectDelay = 5000; // Reset on successful reconnect
-            } else {
-                // Exponential backoff
-                reconnectDelay = (reconnectDelay * 2 > maxReconnectDelay) ? maxReconnectDelay : reconnectDelay * 2;
-                CoreService::log_warn(TAG, "MQTT reconnect failed, retry in %d ms", reconnectDelay);
-            }
-        } else if (self->isConnected) {
-            reconnectDelay = 5000; // Reset when connected
-        }
-    }
-}
 
-// Load broker URI from NVS
+// =======================
+// ===== NVS helpers =====
+// =======================
+
 const char* MqttService::getBrokerUri() {
     static char uri[128] = {0};
     nvs_handle_t nvs_handle;
@@ -265,7 +210,6 @@ bool MqttService::saveBrokerUri(const char* uri) {
     return true;
 }
 
-// Sanitize game title to snake_case for MQTT topic
 void MqttService::sanitizeGameCode(const char* title, char* outCode, size_t outSize) {
     if (!title || !outCode || outSize == 0) return;
     
@@ -292,3 +236,121 @@ void MqttService::sanitizeGameCode(const char* title, char* outCode, size_t outS
         outCode[outSize - 1] = '\0';
     }
 }
+
+void MqttService::state_machine_task_func(void* param) {
+    MqttService* self = (MqttService*)param;
+    self->changeState(STATE_IDLE);
+    
+    while (true) {
+        self->processFSM();
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Check every second
+    }
+}
+
+void MqttService::changeState(State newState) {
+    if (currentState != newState) {
+        CoreService::log_info(TAG, "FSM: %d -> %d", currentState, newState);
+        currentState = newState;
+        stateEnterTime = esp_timer_get_time() / 1000; // milliseconds
+    }
+}
+
+bool MqttService::isWiFiConnected() {
+    wifi_ap_record_t ap_info;
+    return (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK);
+}
+
+void MqttService::processFSM() {
+    int64_t now = esp_timer_get_time() / 1000;
+    int64_t timeInState = now - stateEnterTime;
+    
+    switch (currentState) {
+        case STATE_IDLE:
+            changeState(STATE_CHECK_WIFI);
+            break;
+            
+        case STATE_CHECK_WIFI:
+            if (isWiFiConnected()) {
+                CoreService::log_info(TAG, "WiFi connected, attempting MQTT connect");
+                changeState(STATE_CONNECTING);
+            } else {
+                if (timeInState > 10000) {
+                    CoreService::log_warn(TAG, "Waiting for WiFi...");
+                    stateEnterTime = now;
+                }
+            }
+            break;
+            
+        case STATE_CONNECTING:
+            if (!isWiFiConnected()) {
+                CoreService::log_warn(TAG, "WiFi lost during connect");
+                isConnected = false;
+                if (client) {
+                    esp_mqtt_client_stop(client);
+                }
+                changeState(STATE_CHECK_WIFI);
+                break;
+            }
+            
+            if (!client) {
+                CoreService::log_error(TAG, "MQTT client not initialized");
+                changeState(STATE_DISCONNECTED);
+                break;
+            }
+            
+            // Wait for connection event (handled by handle_event)
+            if (isConnected) {
+                changeState(STATE_CONNECTED);
+            } else if (timeInState > 30000) { // 30 second timeout
+                CoreService::log_error(TAG, "MQTT connect timeout");
+                changeState(STATE_DISCONNECTED);
+            }
+            break;
+            
+        case STATE_CONNECTED:
+            if (!isWiFiConnected()) {
+                CoreService::log_warn(TAG, "WiFi lost");
+                isConnected = false;
+                if (client) {
+                    esp_mqtt_client_stop(client);
+                }
+                changeState(STATE_CHECK_WIFI);
+                break;
+            }
+            
+            if (!isConnected) {
+                CoreService::log_warn(TAG, "MQTT disconnected");
+                changeState(STATE_DISCONNECTED);
+                break;
+            }
+            break;
+            
+        case STATE_DISCONNECTED:
+            if (!isWiFiConnected()) {
+                changeState(STATE_CHECK_WIFI);
+                reconnectDelayMs = 5000; // Reset delay
+                break;
+            }
+            
+            // Wait with exponential backoff, then reconnect
+            if (timeInState >= reconnectDelayMs) {
+                CoreService::log_info(TAG, "Attempting MQTT reconnect...");
+                if (client && isWiFiConnected()) {
+                    esp_err_t err = esp_mqtt_client_reconnect(client);
+                    if (err == ESP_OK) {
+                        changeState(STATE_CONNECTING);
+                        reconnectDelayMs = 5000; // Reset on success
+                    } else {
+                        CoreService::log_error(TAG, "Reconnect failed: %d", err);
+                        // Exponential backoff
+                        reconnectDelayMs = (reconnectDelayMs * 2 > 60000) ? 60000 : reconnectDelayMs * 2;
+                        stateEnterTime = now; // Restart delay
+                    }
+                } else {
+                    changeState(STATE_CHECK_WIFI);
+                }
+            }
+            break;
+    }
+}
+

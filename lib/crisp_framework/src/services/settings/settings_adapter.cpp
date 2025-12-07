@@ -42,4 +42,15 @@ int settings_getComponentStateColor(int index) {
     return component ? component->get_current_state_color() : 0;
 }
 
+bool settings_isWiFiConnected() {
+    auto service = SettingsService::getInstance();
+    if (!service) return false;
+    
+    auto wifiComponent = service->getComponentByName("WiFi");
+    if (!wifiComponent) return false;
+    
+    auto wifiSettings = static_cast<WifiSettingsComponent*>(wifiComponent);
+    return wifiSettings ? wifiSettings->isWiFiConnected() : false;
 }
+
+} 
