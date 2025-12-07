@@ -15,19 +15,19 @@ void addGameInTow();
 void addGameTimberTest();
 
 void addGames() {
-  addGamePakuPaku();
+  //addGamePakuPaku();
   addGameThunder();
-  addGameBallTour();
-  addGameHexmin();
+  //addGameBallTour();
+  //addGameHexmin();
   addGameSurvivor();
-  addGamePinCLimb();
-  addGameColorRoll();
+  //addGamePinCLimb();
+  //addGameColorRoll();
   addGameCastN();
-  addGameReflector();
+  //addGameReflector();
   addGameFroooog();
-  addGameRWheel();
-  addGameLadderDrop();
-  addGameGrapplingH();
-  addGameInTow();
-  addGameTimberTest();
+  //addGameRWheel();
+  //addGameLadderDrop();
+  //addGameGrapplingH();
+  //addGameInTow();
+  //addGameTimberTest();
 }
