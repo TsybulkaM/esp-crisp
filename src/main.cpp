@@ -3,10 +3,13 @@
 #include "drivers/controller/M5/m5_controller_driver.h"
 
 #include "services/core/core_service.h"
+#include "services/core/nvs_cleanup.h"
 #include "services/frame/frame_service.h"
 #include "services/sound/sound_service.h"
 #include "services/settings/settings_service.h"
 #include "services/mqtt/mqtt_service.h"
+#include "services/fota/fota.h"
+#include "services/interfaces/service_manager.h"
 
 extern "C" {
     #include "cglp.h"
@@ -45,9 +48,24 @@ extern "C" void app_main()
     core_service->start_system_monitor();
     #endif
 
+    // Clean up any test data from NVS
+    NVSCleanup::clearTestData();
+    NVSCleanup::validateProductionConfig();
+
+    // Initialize ServiceManager for service coordination
+    ServiceManager* service_manager = new ServiceManager();
+    ServiceManager::setInstance(service_manager);
+
     MqttService* mqtt_service = new MqttService(core_service->getDeviceId());
     MqttService::setInstance(mqtt_service);
+    service_manager->registerMqttService(mqtt_service);
     mqtt_service->start();
+
+    // Initialize FOTA service with URL from NVS (or default from fota.cpp)
+    FotaService* fota_service = new FotaService(FotaService::getUpdateUrl());
+    FotaService::setInstance(fota_service);
+    service_manager->registerFotaService(fota_service);
+    fota_service->start();
 
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(100));

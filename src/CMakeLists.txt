@@ -1,6 +1,18 @@
-# This file was automatically generated for projects
-# without default 'CMakeLists.txt' file.
+# Main application component
 
-FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.*)
+file(GLOB_RECURSE SOURCES 
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp"
+)
 
-idf_component_register(SRCS ${app_sources})
+idf_component_register(
+    SRCS ${SOURCES}
+    INCLUDE_DIRS "."
+    REQUIRES 
+        nvs_flash
+        esp_http_client
+        esp_https_ota
+        esp_wifi
+        mqtt
+)
+
