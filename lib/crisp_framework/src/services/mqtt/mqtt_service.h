@@ -15,6 +15,7 @@ public:
 
     bool start();
     void stop();
+    bool isConnected() const { return isConnected_; }
 
     bool publishOnline();
     bool publishScore(int score, const char* gameCode = nullptr);
@@ -24,6 +25,10 @@ public:
     
     // Helper: sanitize game title to snake_case for MQTT topics
     static void sanitizeGameCode(const char* title, char* outCode, size_t outSize);
+
+    // Config helpers
+    static const char* getBrokerUri();
+    static bool saveBrokerUri(const char* uri);
 
 private:
     struct ScoreMessage {
@@ -46,7 +51,7 @@ private:
     };
     
     // Connection state
-    bool isConnected;
+    bool isConnected_;
     TaskHandle_t reconnectTask;
     TaskHandle_t publishTask;
     State currentState;
@@ -69,8 +74,4 @@ private:
     void changeState(State newState);
     bool isWiFiConnected();
     void processFSM();
-    
-    // Config helpers
-    static const char* getBrokerUri();
-    static bool saveBrokerUri(const char* uri);
 };

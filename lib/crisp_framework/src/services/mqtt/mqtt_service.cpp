@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <ctype.h>
 
-static const char* TAG = "MqttService";
+static const char* TAG = "mqtt";
 static const char* MQTT_NVS_NAMESPACE = "mqtt";
 static const char* MQTT_BROKER_KEY = "broker_uri";
 
@@ -27,7 +27,7 @@ MqttService::MqttService(const char* deviceIdArg, const char* broker_uri) {
     brokerUri[sizeof(brokerUri)-1] = '\0';
     
     client = nullptr;
-    isConnected = false;
+    isConnected_ = false;
     reconnectTask = nullptr;
     publishTask = nullptr;
     scoreQueue = xQueueCreate(10, sizeof(ScoreMessage));
@@ -84,11 +84,29 @@ bool MqttService::start() {
 }
 
 void MqttService::stop() {
+    CoreService::log_info(TAG, "Stopping MQTT service...");
+    
+    // Stop FSM first
+    if (reconnectTask) {
+        vTaskDelete(reconnectTask);
+        reconnectTask = nullptr;
+    }
+    
+    // Stop publish task
+    if (publishTask) {
+        vTaskDelete(publishTask);
+        publishTask = nullptr;
+    }
+    
+    // Stop MQTT client
     if (client) {
         esp_mqtt_client_stop(client);
         esp_mqtt_client_destroy(client);
         client = nullptr;
     }
+    
+    isConnected_ = false;
+    CoreService::log_info(TAG, "MQTT service stopped");
 }
 
 void MqttService::mqtt_event_handler_cb(void* handler_args, esp_event_base_t base, int32_t event_id, void* event_data) {
@@ -102,7 +120,7 @@ void MqttService::handle_event(esp_mqtt_event_handle_t event) {
     switch (event->event_id) {
         case MQTT_EVENT_CONNECTED: {
             CoreService::log_info(TAG, "MQTT event: connected");
-            isConnected = true;
+            isConnected_ = true;
             if (currentState == STATE_CONNECTING) {
                 changeState(STATE_CONNECTED);
             }
@@ -110,14 +128,14 @@ void MqttService::handle_event(esp_mqtt_event_handle_t event) {
         }
         case MQTT_EVENT_DISCONNECTED:
             CoreService::log_warn(TAG, "MQTT event: disconnected");
-            isConnected = false;
+            isConnected_ = false;
             if (currentState == STATE_CONNECTED) {
                 changeState(STATE_DISCONNECTED);
             }
             break;
         case MQTT_EVENT_ERROR:
             CoreService::log_error(TAG, "MQTT event: error");
-            isConnected = false;
+            isConnected_ = false;
             if (currentState == STATE_CONNECTED || currentState == STATE_CONNECTING) {
                 changeState(STATE_DISCONNECTED);
             }
@@ -153,7 +171,7 @@ void MqttService::publishTaskFunc(void* param) {
     ScoreMessage msg;
     while (true) {
         if (xQueueReceive(self->scoreQueue, &msg, portMAX_DELAY) == pdTRUE) {
-            if (self->isConnected) {
+            if (self->isConnected_) {
                 self->doPublishScore(msg.score, msg.gameCode);
             }
         }
@@ -167,7 +185,7 @@ void MqttService::doPublishScore(int score, const char* gameCode) {
     }
     lastPublishTime = now;
     
-    if (!client || !isConnected) return;
+    if (!client || !isConnected_) return;
     char topic[128];
     snprintf(topic, sizeof(topic), "devices/%s/score", deviceId);
     
@@ -284,7 +302,7 @@ void MqttService::processFSM() {
         case STATE_CONNECTING:
             if (!isWiFiConnected()) {
                 CoreService::log_warn(TAG, "WiFi lost during connect");
-                isConnected = false;
+                isConnected_ = false;
                 if (client) {
                     esp_mqtt_client_stop(client);
                 }
@@ -299,7 +317,7 @@ void MqttService::processFSM() {
             }
             
             // Wait for connection event (handled by handle_event)
-            if (isConnected) {
+            if (isConnected_) {
                 changeState(STATE_CONNECTED);
             } else if (timeInState > 30000) { // 30 second timeout
                 CoreService::log_error(TAG, "MQTT connect timeout");
@@ -310,7 +328,7 @@ void MqttService::processFSM() {
         case STATE_CONNECTED:
             if (!isWiFiConnected()) {
                 CoreService::log_warn(TAG, "WiFi lost");
-                isConnected = false;
+                isConnected_ = false;
                 if (client) {
                     esp_mqtt_client_stop(client);
                 }
@@ -318,7 +336,7 @@ void MqttService::processFSM() {
                 break;
             }
             
-            if (!isConnected) {
+            if (!isConnected_) {
                 CoreService::log_warn(TAG, "MQTT disconnected");
                 changeState(STATE_DISCONNECTED);
                 break;

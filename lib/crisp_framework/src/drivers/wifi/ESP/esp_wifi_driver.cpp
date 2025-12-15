@@ -116,6 +116,16 @@ bool ESPWiFiDriver::startAP(const char* ssid, const char* password) {
         wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
     }
     
+    // Check current WiFi mode
+    wifi_mode_t current_mode;
+    esp_err_t err = esp_wifi_get_mode(&current_mode);
+    if (err == ESP_OK && current_mode != WIFI_MODE_NULL) {
+        // WiFi already initialized, stop it first
+        CoreService::log_info(TAG, "WiFi already running in mode %d, stopping...", current_mode);
+        esp_wifi_stop();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
@@ -227,11 +237,20 @@ void ESPWiFiDriver::eventHandler(void* arg, esp_event_base_t event_base,
                 CoreService::log_info(TAG, "WiFi connected");
                 driver->stationConnected = true;
                 break;
-            case WIFI_EVENT_STA_DISCONNECTED:
-                CoreService::log_info(TAG, "WiFi disconnected");
+            case WIFI_EVENT_STA_DISCONNECTED: {
+                wifi_event_sta_disconnected_t* disconn_event = (wifi_event_sta_disconnected_t*)event_data;
+                CoreService::log_warn(TAG, "WiFi disconnected, reason: %d", disconn_event->reason);
                 driver->stationConnected = false;
                 driver->stationIP[0] = '\0';
+                
+                // Auto-reconnect if STA mode is still active
+                wifi_mode_t mode;
+                if (esp_wifi_get_mode(&mode) == ESP_OK && (mode == WIFI_MODE_STA || mode == WIFI_MODE_APSTA)) {
+                    CoreService::log_info(TAG, "Attempting to reconnect...");
+                    esp_wifi_connect();
+                }
                 break;
+            }
         }
     } else if (event_base == IP_EVENT) {
         if (event_id == IP_EVENT_STA_GOT_IP) {

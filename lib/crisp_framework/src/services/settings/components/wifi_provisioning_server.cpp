@@ -1,6 +1,7 @@
 #include "wifi.h"
 
 #include "../../core/core_service.h"       // For logging
+#include "../../mqtt/mqtt_service.h"       // For MQTT broker saving
 #include <esp_system.h>
 #include "esp_event.h"
 #include <string.h>
@@ -15,9 +16,10 @@ static const char* HTML_PAGE = R"rawliteral(
 <body style="font-family:Arial;padding:20px;max-width:400px;margin:0 auto">
 <h2>M5StickC WiFi Setup</h2>
 <form action="/save" method="POST">
-<p><label>SSID:<br><input type="text" name="ssid" required style="width:100%;padding:8px"></label></p>
-<p><label>Password:<br><input type="password" name="password" style="width:100%;padding:8px"></label></p>
-<p><button type="submit" style="width:100%;padding:10px;background:#0066cc;color:white;border:none">Connect</button></p>
+<p><label>SSID (optional):<br><input type="text" name="ssid" style="width:100%;padding:8px"></label></p>
+<p><label>Password (optional):<br><input type="password" name="password" style="width:100%;padding:8px"></label></p>
+<p><label>MQTT Broker (optional):<br><input type="text" name="broker" placeholder="mqtt://192.168.1.179:1883" style="width:100%;padding:8px"></label></p>
+<p><button type="submit" style="width:100%;padding:10px;background:#0066cc;color:white;border:none">Save</button></p>
 </form>
 </body></html>
 )rawliteral";
@@ -99,6 +101,13 @@ int WifiSettingsComponent::getConnectedClients() {
 
 // HTTP Server implementation
 bool WifiSettingsComponent::startHTTPServer() {
+    // Stop any existing server first
+    if (httpServer) {
+        CoreService::log_warn(TAG, "HTTP server already exists, stopping it first...");
+        stopHTTPServer();
+        vTaskDelay(pdMS_TO_TICKS(500));  // Wait for cleanup
+    }
+    
     // Free up memory before starting HTTP server
     size_t free_heap_before = esp_get_free_heap_size();
     
@@ -128,7 +137,26 @@ bool WifiSettingsComponent::startHTTPServer() {
             (unsigned long)(free_heap_after_delay - free_heap_before));
     }
     
-    esp_err_t err = httpd_start(&httpServer, &config);
+    // Try to start server with retry
+    esp_err_t err = ESP_FAIL;
+    for (int retry = 0; retry < 3; retry++) {
+        err = httpd_start(&httpServer, &config);
+        if (err == ESP_OK) {
+            break;
+        }
+        
+        CoreService::log_warn(TAG, "Failed to start HTTP server (attempt %d/3): %s", 
+            retry + 1, esp_err_to_name(err));
+        
+        if (err == ESP_ERR_HTTPD_ALLOC_MEM) {
+            CoreService::log_error(TAG, "Out of memory!");
+            break;
+        }
+        
+        // Wait and retry
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    
     if (err != ESP_OK) {
         CoreService::log_error(TAG, "Failed to start HTTP server: %s", esp_err_to_name(err));
         return false;
@@ -175,8 +203,15 @@ bool WifiSettingsComponent::startHTTPServer() {
 
 void WifiSettingsComponent::stopHTTPServer() {
     if (httpServer) {
-        httpd_stop(httpServer);
+        CoreService::log_info(TAG, "Stopping HTTP server...");
+        esp_err_t err = httpd_stop(httpServer);
+        if (err != ESP_OK) {
+            CoreService::log_warn(TAG, "Failed to stop HTTP server: %s", esp_err_to_name(err));
+        }
         httpServer = nullptr;
+        
+        // Give time for cleanup
+        vTaskDelay(pdMS_TO_TICKS(200));
         CoreService::log_info(TAG, "HTTP server stopped");
     }
 }
@@ -199,7 +234,7 @@ esp_err_t WifiSettingsComponent::handleSave(httpd_req_t *req) {
     
     CoreService::log_info(TAG, "HTTP POST /save - receiving credentials");
     
-    char buf[256];
+    char buf[512];
     int ret = httpd_req_recv(req, buf, sizeof(buf) - 1);
     if (ret <= 0) {  
         CoreService::log_error(TAG, "Failed to receive POST data: %d", ret);
@@ -212,9 +247,11 @@ esp_err_t WifiSettingsComponent::handleSave(httpd_req_t *req) {
     
     char ssid[33] = {0};
     char password[65] = {0};
+    char broker[128] = {0};
     
     char *ssid_start = strstr(buf, "ssid=");
     char *pass_start = strstr(buf, "password=");
+    char *broker_start = strstr(buf, "broker=");
     
     if (ssid_start) {
         ssid_start += 5;
@@ -225,11 +262,45 @@ esp_err_t WifiSettingsComponent::handleSave(httpd_req_t *req) {
     
     if (pass_start) {
         pass_start += 9;
-        strncpy(password, pass_start, 64);
+        char *end = strchr(pass_start, '&');
+        int len = end ? (end - pass_start) : strlen(pass_start);
+        strncpy(password, pass_start, len < 64 ? len : 64);
     }
     
-    CoreService::log_info(TAG, "Saving credentials: SSID='%s'", ssid);
-    service->saveWiFiCredentials(ssid, password);
+    if (broker_start) {
+        broker_start += 7;
+        char *end = strchr(broker_start, '&');
+        int len = end ? (end - broker_start) : strlen(broker_start);
+        if (len > 0 && len < 128) {
+            strncpy(broker, broker_start, len);
+            // URL decode the broker URI (convert %3A to :, %2F to /, etc.)
+            char decoded[128] = {0};
+            size_t j = 0;
+            for (size_t i = 0; broker[i] && j < 127; i++) {
+                if (broker[i] == '%' && broker[i+1] && broker[i+2]) {
+                    char hex[3] = {broker[i+1], broker[i+2], 0};
+                    decoded[j++] = (char)strtol(hex, nullptr, 16);
+                    i += 2;
+                } else if (broker[i] == '+') {
+                    decoded[j++] = ' ';
+                } else {
+                    decoded[j++] = broker[i];
+                }
+            }
+            strncpy(broker, decoded, 127);
+        }
+    }
+    
+    // Save WiFi credentials only if SSID is provided
+    if (strlen(ssid) > 0) {
+        CoreService::log_info(TAG, "Saving WiFi credentials: SSID='%s'", ssid);
+        service->saveWiFiCredentials(ssid, password);
+    }
+    
+    if (strlen(broker) > 0) {
+        CoreService::log_info(TAG, "Saving MQTT broker: %s", broker);
+        MqttService::saveBrokerUri(broker);
+    }
     
     const char* success = "<html><body><h1>Saved!</h1><p>Connecting...</p></body></html>";
     httpd_resp_set_type(req, "text/html");
